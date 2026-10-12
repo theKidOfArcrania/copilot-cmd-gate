@@ -33,7 +33,12 @@ impl Env {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(stdin.as_bytes())
+            .unwrap();
         let out = child.wait_with_output().unwrap();
         (String::from_utf8(out.stdout).unwrap(), out.status.success())
     }
@@ -115,6 +120,13 @@ fn simple_commands_fall_through() {
         "echo \"a|b;c&d(e)\"",
         "'ls' -la",
         "\"ls\" -la",
+        "cd /tmp && ls",
+        "cd /tmp; ls",
+        "cd /tmp&&ls",
+        "cd 'my dir' && git status",
+        "cd ~/x && cargo test > log 2>&1",
+        "cd .. && ls",
+        "cd x && cd y",
     ] {
         assert_eq!(env.run("s", cmd), Out::Fall, "{cmd:?}");
     }
@@ -131,8 +143,19 @@ fn complex_commands_are_denied() {
         "a;b",
         "a && b",
         "a || b",
-        "cd x && ls",
-        "cd x; ls",
+        "cd x || ls",
+        "cd x && ls && ls",
+        "cd x; cd y; ls",
+        "cd x && ls | head",
+        "cd - && ls",
+        "cd && ls",
+        "cd $HOME && ls",
+        "cd x > f && ls",
+        "ls && cd x",
+        "echo a && ls",
+        "cd x && source y.sh",
+        "cd x; for",
+        "cd x &",
         "a &",
         "a & b",
         "(a)",
@@ -263,6 +286,18 @@ fn interpreters_deny_then_allow_once() {
 }
 
 #[test]
+fn cd_prefix_does_not_hide_interpreters() {
+    let env = Env::new();
+    for cmd in ["cd x && python3 a.py", "cd x; node a.js", "cd x && sudo ls"] {
+        assert_eq!(env.run("s", cmd), Out::Interp, "first: {cmd:?}");
+        assert_eq!(env.run("s", cmd), Out::Fall, "second: {cmd:?}");
+    }
+    assert_eq!(env.run("s", "cd x && python3 a.py"), Out::Interp);
+    assert_eq!(env.run("s", "cd y && python3 a.py"), Out::Interp);
+    assert_eq!(env.run("s", "python3 a.py"), Out::Interp);
+}
+
+#[test]
 fn backdoor_requires_the_exact_same_command() {
     let env = Env::new();
     assert_eq!(env.run("s", "python3 a.py"), Out::Interp);
@@ -339,8 +374,14 @@ fn payload_variants() {
         c(r#"{"tool_name":"bash","session_id":"s","tool_input":{"command":"a | b"}}"#),
         Out::Complex
     );
-    assert_eq!(c(r#"{"toolName":"bash","toolInput":{"command":"python3 x"}}"#), Out::Interp);
-    assert_eq!(c(r#"{"toolName":"bash","toolInput":{"command":"ls"}}"#), Out::Fall);
+    assert_eq!(
+        c(r#"{"toolName":"bash","toolInput":{"command":"python3 x"}}"#),
+        Out::Interp
+    );
+    assert_eq!(
+        c(r#"{"toolName":"bash","toolInput":{"command":"ls"}}"#),
+        Out::Fall
+    );
     assert_eq!(
         c(r#"{"toolName":"bash","sessionId":null,"toolInput":{"command":"python3 y"}}"#),
         Out::Interp
@@ -376,17 +417,55 @@ fn payload_variants() {
 #[test]
 fn metacharacters_in_every_quoting_context() {
     let env = Env::new();
-    for ch in ['|', '&', ';', '(', ')', '{', '}', '[', ']', '`', '$', '\\', '!'] {
-        assert_eq!(env.run("s", &format!("ls a{ch}b")), Out::Complex, "bare {ch:?}");
-        assert_eq!(env.run("s", &format!("ls {ch}")), Out::Complex, "alone {ch:?}");
-        assert_eq!(env.run("s", &format!("ls a {ch} b")), Out::Complex, "spaced {ch:?}");
-        assert_eq!(env.run("s", &format!("ls 'a{ch}b'")), Out::Fall, "single {ch:?}");
-        let want = if matches!(ch, '`' | '$' | '\\' | '!') { Out::Complex } else { Out::Fall };
-        assert_eq!(env.run("s", &format!("ls \"a{ch}b\"")), want, "double {ch:?}");
+    for ch in [
+        '|', '&', ';', '(', ')', '{', '}', '[', ']', '`', '$', '\\', '!',
+    ] {
+        assert_eq!(
+            env.run("s", &format!("ls a{ch}b")),
+            Out::Complex,
+            "bare {ch:?}"
+        );
+        assert_eq!(
+            env.run("s", &format!("ls {ch}")),
+            Out::Complex,
+            "alone {ch:?}"
+        );
+        assert_eq!(
+            env.run("s", &format!("ls a {ch} b")),
+            Out::Complex,
+            "spaced {ch:?}"
+        );
+        assert_eq!(
+            env.run("s", &format!("ls 'a{ch}b'")),
+            Out::Fall,
+            "single {ch:?}"
+        );
+        let want = if matches!(ch, '`' | '$' | '\\' | '!') {
+            Out::Complex
+        } else {
+            Out::Fall
+        };
+        assert_eq!(
+            env.run("s", &format!("ls \"a{ch}b\"")),
+            want,
+            "double {ch:?}"
+        );
     }
-    assert_eq!(env.run("s", "ls 'a\nb'"), Out::Complex, "newline in single quotes");
-    assert_eq!(env.run("s", "ls \"a\nb\""), Out::Complex, "newline in double quotes");
-    assert_eq!(env.run("s", "ls 'a\tb'"), Out::Complex, "tab in single quotes");
+    assert_eq!(
+        env.run("s", "ls 'a\nb'"),
+        Out::Complex,
+        "newline in single quotes"
+    );
+    assert_eq!(
+        env.run("s", "ls \"a\nb\""),
+        Out::Complex,
+        "newline in double quotes"
+    );
+    assert_eq!(
+        env.run("s", "ls 'a\tb'"),
+        Out::Complex,
+        "tab in single quotes"
+    );
 }
 
 #[test]

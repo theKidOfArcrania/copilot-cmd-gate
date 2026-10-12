@@ -2,12 +2,14 @@
 //!
 //! Accepts exactly one simple command: plain words (optionally single or
 //! double quoted) plus `>`, `>>`, `<` file redirects and `N>&1`/`N>&2`
-//! dups. Everything else is rejected, so this is meant to accept a strict
-//! subset of what the CLI's own parser accepts.
+//! dups. As the single exception, the command may be preceded by one
+//! `cd <dir>` joined with `;` or `&&`. Everything else is rejected, so this
+//! is meant to accept a strict subset of what the CLI's own parser accepts.
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Simple {
     pub words: Vec<String>,
+    pub cd: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -15,10 +17,37 @@ enum Tok {
     Word(String),
     Redir,
     Dup,
+    Sep,
 }
 
 pub fn parse(input: &str) -> Result<Simple, String> {
     let toks = tokenize(input)?;
+    let segments: Vec<&[Tok]> = toks.split(|t| *t == Tok::Sep).collect();
+    match segments.as_slice() {
+        [only] => Ok(Simple {
+            words: parse_command(only)?,
+            cd: None,
+        }),
+        [prefix, command] => Ok(Simple {
+            words: parse_command(command)?,
+            cd: Some(parse_cd(prefix)?),
+        }),
+        _ => Err("more than one command".into()),
+    }
+}
+
+fn parse_cd(toks: &[Tok]) -> Result<String, String> {
+    match toks {
+        [Tok::Word(cd), Tok::Word(dir)]
+            if cd == "cd" && !dir.is_empty() && !dir.starts_with('-') =>
+        {
+            Ok(dir.clone())
+        }
+        _ => Err("only a plain `cd <dir>` may precede a command".into()),
+    }
+}
+
+fn parse_command(toks: &[Tok]) -> Result<Vec<String>, String> {
     let mut words = Vec::new();
     let mut i = 0;
     while i < toks.len() {
@@ -29,6 +58,7 @@ pub fn parse(input: &str) -> Result<Simple, String> {
                 Some(Tok::Word(_)) => i += 1,
                 _ => return Err("redirect without a plain file target".into()),
             },
+            Tok::Sep => unreachable!("segments are split on separators"),
         }
         i += 1;
     }
@@ -38,7 +68,7 @@ pub fn parse(input: &str) -> Result<Simple, String> {
     if first.contains('=') {
         return Err("leading environment variable assignment".into());
     }
-    Ok(Simple { words })
+    Ok(words)
 }
 
 fn bad(c: char) -> String {
@@ -127,7 +157,23 @@ fn tokenize(input: &str) -> Result<Vec<Tok>, String> {
                 toks.push(Tok::Redir);
             }
             '#' if !in_word => return Err(bad('#')),
-            '|' | '&' | ';' | '(' | ')' | '{' | '}' | '[' | ']' | '`' | '$' | '\\' | '!' => {
+            ';' | '&' => {
+                let next = chars.get(i + 1);
+                let after = chars.get(i + 2);
+                let is_and = c == '&' && next == Some(&'&');
+                let ok_after = !matches!(after, Some('&' | '|' | ';' | '>' | '<'));
+                if c == ';' && !matches!(next, Some('&' | ';' | '|')) {
+                    flush!();
+                    toks.push(Tok::Sep);
+                } else if is_and && ok_after {
+                    flush!();
+                    toks.push(Tok::Sep);
+                    i += 1;
+                } else {
+                    return Err(bad(c));
+                }
+            }
+            '|' | '(' | ')' | '{' | '}' | '[' | ']' | '`' | '$' | '\\' | '!' => {
                 return Err(bad(c));
             }
             _ if c.is_control() || !c.is_ascii() => return Err(bad(c)),
@@ -169,6 +215,67 @@ mod tests {
         assert_eq!(words("echo a>b"), ["echo", "a"]);
         assert_eq!(words("'python' x"), ["python", "x"]);
         assert_eq!(words("echo 'a'\"b\"c"), ["echo", "abc"]);
+    }
+
+    #[test]
+    fn accepts_cd_prefix() {
+        for s in [
+            "cd x && ls -la",
+            "cd x; ls -la",
+            "cd x;ls -la",
+            "cd 'my dir' && ls -la",
+            "cd /a/b&&ls -la",
+            "cd ~/x && ls > out 2>&1",
+        ] {
+            let p = parse(s).unwrap_or_else(|e| panic!("{s:?}: {e}"));
+            assert_eq!(p.words[0], "ls", "{s:?}");
+            assert!(p.cd.is_some(), "{s:?}");
+        }
+        assert_eq!(parse("cd 'my dir' && ls").unwrap().cd.unwrap(), "my dir");
+        assert_eq!(parse("ls").unwrap().cd, None);
+    }
+
+    #[test]
+    fn rejects_bad_cd_prefix() {
+        for s in [
+            "cd x && cd y && ls",
+            "cd x; cd y; ls",
+            "cd x && ls && ls",
+            "cd x; ls; ls",
+            "cd x && ls | cat",
+            "cd && ls",
+            "cd; ls",
+            "cd - && ls",
+            "cd -P x && ls",
+            "cd '' && ls",
+            "cd x y && ls",
+            "cd x > f && ls",
+            "cd x 2>&1; ls",
+            "cd $HOME && ls",
+            "cd x &&",
+            "cd x;",
+            "cd x && ;",
+            "&& ls",
+            "; ls",
+            "cd x &&& ls",
+            "cd x && & ls",
+            "cd x ;; ls",
+            "cd x ;& ls",
+            "cd x && && ls",
+            "cd x &&> f",
+            "ls && cd x",
+            "ls; cd x",
+            "ls && cd x && ls",
+            "echo a && ls",
+            "FOO=1 cd x && ls",
+            "cd x && FOO=1 ls",
+            "(cd x) && ls",
+            "{ cd x; } && ls",
+            "cd x || ls",
+            "cd x & ls",
+        ] {
+            assert!(parse(s).is_err(), "should reject: {s:?}");
+        }
     }
 
     #[test]

@@ -20,9 +20,9 @@ fn field<'a>(v: &'a Value, camel: &str, snake: &str) -> Option<&'a Value> {
 fn deny_complex(reason: &str) -> String {
     format!(
         "Command rejected: {reason}. Rewrite it as one simple command (a single program with plain \
-         arguments, optionally with > >> < or 2>&1 file redirects). No pipes, ; && ||, \
-         substitutions, variables, or subshells; use a separate tool call per step, or the \
-         dedicated view/grep/glob/edit tools."
+         arguments, optionally with > >> < or 2>&1 file redirects, and optionally preceded by one \
+         `cd <dir> &&` or `cd <dir>;`). No pipes, other ; && ||, substitutions, variables, or \
+         subshells; use a separate tool call per step, or the dedicated view/grep/glob/edit tools."
     )
 }
 
