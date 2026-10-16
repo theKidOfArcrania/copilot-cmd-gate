@@ -1,15 +1,16 @@
 //! Deliberately tiny and strict shell parser.
 //!
-//! Accepts exactly one simple command: plain words (optionally single or
-//! double quoted) plus `>`, `>>`, `<` file redirects and `N>&1`/`N>&2`
-//! dups. As the single exception, the command may be preceded by one
-//! `cd <dir>` joined with `;` or `&&`. Everything else is rejected, so this
-//! is meant to accept a strict subset of what the CLI's own parser accepts.
+//! Accepts a list of simple commands joined by `;` or `&&`. Each command is
+//! plain words (optionally single or double quoted) plus `>`, `>>`, `<` file
+//! redirects and `N>&1`/`N>&2` dups. Everything else is rejected, so this is
+//! meant to accept a strict subset of what the CLI's own parser accepts.
+
+/// Upper bound on chained commands, to keep deny messages actionable.
+pub const MAX_COMMANDS: usize = 8;
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct Simple {
-    pub words: Vec<String>,
-    pub cd: Option<String>,
+pub struct Script {
+    pub commands: Vec<Vec<String>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -20,31 +21,16 @@ enum Tok {
     Sep,
 }
 
-pub fn parse(input: &str) -> Result<Simple, String> {
+pub fn parse(input: &str) -> Result<Script, String> {
     let toks = tokenize(input)?;
-    let segments: Vec<&[Tok]> = toks.split(|t| *t == Tok::Sep).collect();
-    match segments.as_slice() {
-        [only] => Ok(Simple {
-            words: parse_command(only)?,
-            cd: None,
-        }),
-        [prefix, command] => Ok(Simple {
-            words: parse_command(command)?,
-            cd: Some(parse_cd(prefix)?),
-        }),
-        _ => Err("more than one command".into()),
+    let commands = toks
+        .split(|t| *t == Tok::Sep)
+        .map(parse_command)
+        .collect::<Result<Vec<_>, _>>()?;
+    if commands.len() > MAX_COMMANDS {
+        return Err(format!("more than {MAX_COMMANDS} chained commands"));
     }
-}
-
-fn parse_cd(toks: &[Tok]) -> Result<String, String> {
-    match toks {
-        [Tok::Word(cd), Tok::Word(dir)]
-            if cd == "cd" && !dir.is_empty() && !dir.starts_with('-') =>
-        {
-            Ok(dir.clone())
-        }
-        _ => Err("only a plain `cd <dir>` may precede a command".into()),
-    }
+    Ok(Script { commands })
 }
 
 fn parse_command(toks: &[Tok]) -> Result<Vec<String>, String> {
@@ -140,7 +126,7 @@ fn tokenize(input: &str) -> Result<Vec<Tok>, String> {
                 if c == '>' && chars.get(i + 1) == Some(&'&') {
                     let fd = chars.get(i + 2);
                     let after = chars.get(i + 3);
-                    let ended = after.is_none_or(|a| *a == ' ' || *a == '\t');
+                    let ended = after.is_none_or(|a| matches!(a, ' ' | '\t' | ';' | '&'));
                     if matches!(fd, Some('1' | '2')) && ended {
                         toks.push(Tok::Dup);
                         i += 3;
@@ -197,8 +183,14 @@ fn tokenize(input: &str) -> Result<Vec<Tok>, String> {
 mod tests {
     use super::*;
 
+    fn commands(s: &str) -> Vec<Vec<String>> {
+        parse(s).unwrap().commands
+    }
+
     fn words(s: &str) -> Vec<String> {
-        parse(s).unwrap().words
+        let mut c = commands(s);
+        assert_eq!(c.len(), 1, "{s:?}");
+        c.remove(0)
     }
 
     #[test]
@@ -210,6 +202,10 @@ mod tests {
         );
         assert_eq!(words("echo \"hi there\" > out.txt"), ["echo", "hi there"]);
         assert_eq!(words("cargo test >> log 2>&1"), ["cargo", "test"]);
+        assert_eq!(
+            commands("a 2>&1; b 2>&1&&c"),
+            [vec!["a"], vec!["b"], vec!["c"]]
+        );
         assert_eq!(words("sort < in.txt"), ["sort"]);
         assert_eq!(words("ls *.rs ~/x a#b"), ["ls", "*.rs", "~/x", "a#b"]);
         assert_eq!(words("echo a>b"), ["echo", "a"]);
@@ -218,61 +214,61 @@ mod tests {
     }
 
     #[test]
-    fn accepts_cd_prefix() {
-        for s in [
-            "cd x && ls -la",
-            "cd x; ls -la",
-            "cd x;ls -la",
-            "cd 'my dir' && ls -la",
-            "cd /a/b&&ls -la",
-            "cd ~/x && ls > out 2>&1",
-        ] {
-            let p = parse(s).unwrap_or_else(|e| panic!("{s:?}: {e}"));
-            assert_eq!(p.words[0], "ls", "{s:?}");
-            assert!(p.cd.is_some(), "{s:?}");
-        }
-        assert_eq!(parse("cd 'my dir' && ls").unwrap().cd.unwrap(), "my dir");
-        assert_eq!(parse("ls").unwrap().cd, None);
+    fn accepts_chains() {
+        assert_eq!(
+            commands("cd x && ls -la"),
+            [vec!["cd", "x"], vec!["ls", "-la"]]
+        );
+        assert_eq!(commands("a; b"), [vec!["a"], vec!["b"]]);
+        assert_eq!(commands("a;b"), [vec!["a"], vec!["b"]]);
+        assert_eq!(commands("a&&b"), [vec!["a"], vec!["b"]]);
+        assert_eq!(
+            commands("a && b; c && d"),
+            [vec!["a"], vec!["b"], vec!["c"], vec!["d"]]
+        );
+        assert_eq!(
+            commands("cd 'my dir' && ls > o 2>&1"),
+            [vec!["cd", "my dir"], vec!["ls"]]
+        );
+        assert_eq!(
+            commands("echo 'a; b && c' ; ls"),
+            [vec!["echo", "a; b && c"], vec!["ls"]]
+        );
+        let eight = ["a"; MAX_COMMANDS].join(" && ");
+        assert_eq!(commands(&eight).len(), MAX_COMMANDS);
     }
 
     #[test]
-    fn rejects_bad_cd_prefix() {
+    fn rejects_bad_chains() {
+        let nine = ["a"; MAX_COMMANDS + 1].join(" && ");
+        assert!(parse(&nine).is_err());
         for s in [
-            "cd x && cd y && ls",
-            "cd x; cd y; ls",
-            "cd x && ls && ls",
-            "cd x; ls; ls",
-            "cd x && ls | cat",
-            "cd && ls",
-            "cd; ls",
-            "cd - && ls",
-            "cd -P x && ls",
-            "cd '' && ls",
-            "cd x y && ls",
-            "cd x > f && ls",
-            "cd x 2>&1; ls",
-            "cd $HOME && ls",
-            "cd x &&",
-            "cd x;",
-            "cd x && ;",
-            "&& ls",
-            "; ls",
-            "cd x &&& ls",
-            "cd x && & ls",
-            "cd x ;; ls",
-            "cd x ;& ls",
-            "cd x && && ls",
-            "cd x &&> f",
-            "ls && cd x",
-            "ls; cd x",
-            "ls && cd x && ls",
-            "echo a && ls",
-            "FOO=1 cd x && ls",
-            "cd x && FOO=1 ls",
-            "(cd x) && ls",
-            "{ cd x; } && ls",
-            "cd x || ls",
-            "cd x & ls",
+            "a &&",
+            "a;",
+            "a ;",
+            "a && ;",
+            "&& a",
+            "; a",
+            "a &&& b",
+            "a && & b",
+            "a ;; b",
+            "a ;& b",
+            "a && && b",
+            "a ; ; b",
+            "a &&> f",
+            "a || b",
+            "a & b",
+            "a && b | c",
+            "a && b &",
+            "a && $x",
+            "a > f && FOO=1 b",
+            "FOO=1 a && b",
+            "a && (b)",
+            "a && { b; }",
+            "a && b\nc",
+            "a && > f",
+            "a && 2>&1",
+            "a ; 2>&1",
         ] {
             assert!(parse(s).is_err(), "should reject: {s:?}");
         }
@@ -282,8 +278,6 @@ mod tests {
     fn rejects_complex() {
         for s in [
             "a | b",
-            "a; b",
-            "a && b",
             "a || b",
             "a &",
             "a & b",
@@ -307,6 +301,8 @@ mod tests {
             "a >&3",
             "a >& f",
             "a 2>&1x",
+            "a 2>&1&",
+            "a 2>&1&&&b",
             "a >",
             "a > > b",
             "a > $f",

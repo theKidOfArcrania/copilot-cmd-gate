@@ -1,4 +1,4 @@
-use crate::parse::Simple;
+use crate::parse::Script;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Class {
@@ -71,15 +71,20 @@ fn base(word: &str) -> String {
     trimmed.to_ascii_lowercase()
 }
 
-pub fn classify(cmd: &Simple) -> Class {
-    let name = base(&cmd.words[0]);
-    if WRAPPERS.contains(&name.as_str()) {
-        Class::Wrapper(name)
-    } else if INTERPRETERS.contains(&name.as_str()) {
-        Class::Interpreter(name)
-    } else {
-        Class::Plain
+/// Wrappers win over interpreters, which win over plain commands, so one
+/// risky command in a chain determines how the whole chain is handled.
+pub fn classify(script: &Script) -> Class {
+    let mut interp = None;
+    for cmd in &script.commands {
+        let name = base(&cmd[0]);
+        if WRAPPERS.contains(&name.as_str()) {
+            return Class::Wrapper(name);
+        }
+        if interp.is_none() && INTERPRETERS.contains(&name.as_str()) {
+            interp = Some(name);
+        }
     }
+    interp.map_or(Class::Plain, Class::Interpreter)
 }
 
 #[cfg(test)]
@@ -105,5 +110,14 @@ mod tests {
         assert_eq!(c("ls -la"), Class::Plain);
         assert_eq!(c("cargo test"), Class::Plain);
         assert_eq!(c("./script.sh"), Class::Plain);
+        assert_eq!(c("cd x && ls; git status"), Class::Plain);
+        assert_eq!(
+            c("cd x && python3 a.py"),
+            Class::Interpreter("python".into())
+        );
+        assert_eq!(c("ls; ls; node a.js"), Class::Interpreter("node".into()));
+        assert_eq!(c("python3 a; node b"), Class::Interpreter("python".into()));
+        assert_eq!(c("python3 a && source b"), Class::Wrapper("source".into()));
+        assert_eq!(c("source b; python3 a"), Class::Wrapper("source".into()));
     }
 }

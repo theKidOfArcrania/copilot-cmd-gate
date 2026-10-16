@@ -127,6 +127,18 @@ fn simple_commands_fall_through() {
         "cd ~/x && cargo test > log 2>&1",
         "cd .. && ls",
         "cd x && cd y",
+        "a; b",
+        "a;b",
+        "a && b",
+        "a && b; c && d",
+        "ls; ls; ls",
+        "git add . && git status",
+        "cd x && cargo build 2>&1; cargo test >> log 2>&1",
+        "echo 'a; b && c' ; ls",
+        "mkdir x && touch x/y; rm -r x",
+        "ls && cd x",
+        "echo a && ls",
+        "ls && ls && ls && ls && ls && ls && ls && ls",
     ] {
         assert_eq!(env.run("s", cmd), Out::Fall, "{cmd:?}");
     }
@@ -139,20 +151,30 @@ fn complex_commands_are_denied() {
         "ls | head",
         "ls|head",
         "a | b | c",
-        "a; b",
-        "a;b",
-        "a && b",
         "a || b",
+        "a; b || c",
+        "a && b | c",
+        "a && b &",
+        "a; b & c",
+        "a;",
+        "a &&",
+        "a ;",
+        "; a",
+        "&& a",
+        "a ;; b",
+        "a &&& b",
+        "a && && b",
         "cd x || ls",
-        "cd x && ls && ls",
-        "cd x; cd y; ls",
         "cd x && ls | head",
-        "cd - && ls",
-        "cd && ls",
         "cd $HOME && ls",
-        "cd x > f && ls",
-        "ls && cd x",
-        "echo a && ls",
+        "cd x; echo $y",
+        "cd x && (ls)",
+        "cd x && { ls; }",
+        "cd x\nls",
+        "FOO=1 a && b",
+        "a && FOO=1 b",
+        "a && > f",
+        "ls && ls && ls && ls && ls && ls && ls && ls && ls",
         "cd x && source y.sh",
         "cd x; for",
         "cd x &",
@@ -286,15 +308,26 @@ fn interpreters_deny_then_allow_once() {
 }
 
 #[test]
-fn cd_prefix_does_not_hide_interpreters() {
+fn chains_do_not_hide_risky_commands() {
     let env = Env::new();
-    for cmd in ["cd x && python3 a.py", "cd x; node a.js", "cd x && sudo ls"] {
+    for cmd in [
+        "cd x && python3 a.py",
+        "cd x; node a.js",
+        "cd x && sudo ls",
+        "ls; ls; bash -c x",
+        "python3 a; node b",
+    ] {
         assert_eq!(env.run("s", cmd), Out::Interp, "first: {cmd:?}");
         assert_eq!(env.run("s", cmd), Out::Fall, "second: {cmd:?}");
     }
     assert_eq!(env.run("s", "cd x && python3 a.py"), Out::Interp);
     assert_eq!(env.run("s", "cd y && python3 a.py"), Out::Interp);
     assert_eq!(env.run("s", "python3 a.py"), Out::Interp);
+    for cmd in ["ls && source x", "source x; python3 a", "ls; for"] {
+        for _ in 0..3 {
+            assert_eq!(env.run("s", cmd), Out::Complex, "{cmd:?}");
+        }
+    }
 }
 
 #[test]
@@ -417,9 +450,7 @@ fn payload_variants() {
 #[test]
 fn metacharacters_in_every_quoting_context() {
     let env = Env::new();
-    for ch in [
-        '|', '&', ';', '(', ')', '{', '}', '[', ']', '`', '$', '\\', '!',
-    ] {
+    for ch in ['|', '(', ')', '{', '}', '[', ']', '`', '$', '\\', '!', '&'] {
         assert_eq!(
             env.run("s", &format!("ls a{ch}b")),
             Out::Complex,
@@ -451,6 +482,12 @@ fn metacharacters_in_every_quoting_context() {
             "double {ch:?}"
         );
     }
+    // `;` is a command separator, so it is only valid between two commands.
+    assert_eq!(env.run("s", "ls a;b"), Out::Fall);
+    assert_eq!(env.run("s", "ls a ; b"), Out::Fall);
+    assert_eq!(env.run("s", "ls ;"), Out::Complex);
+    assert_eq!(env.run("s", "ls 'a;b'"), Out::Fall);
+    assert_eq!(env.run("s", "ls \"a;b\""), Out::Fall);
     assert_eq!(
         env.run("s", "ls 'a\nb'"),
         Out::Complex,
