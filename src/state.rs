@@ -9,10 +9,18 @@ use std::path::PathBuf;
 pub const RECENT_CAP: usize = 10;
 
 fn dir() -> Option<PathBuf> {
-    let base = match std::env::var_os("XDG_STATE_HOME") {
-        Some(p) if !p.is_empty() => PathBuf::from(p),
-        _ => PathBuf::from(std::env::var_os("HOME")?).join(".local/state"),
-    };
+    let nonempty_env = |name| std::env::var_os(name).filter(|value| !value.is_empty());
+    let base = nonempty_env("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| nonempty_env("HOME").map(|home| PathBuf::from(home).join(".local/state")));
+    #[cfg(windows)]
+    let base = base
+        .or_else(|| nonempty_env("LOCALAPPDATA").map(PathBuf::from))
+        .or_else(|| {
+            nonempty_env("USERPROFILE")
+                .map(|home| PathBuf::from(home).join("AppData").join("Local"))
+        });
+    let base = base?;
     Some(base.join("copilot-cmd-gate"))
 }
 

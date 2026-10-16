@@ -12,7 +12,31 @@ mod state;
 
 use classify::{Class, Dialect};
 use serde_json::{Value, json};
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom, Write};
+
+fn diagnostic(event: Value) {
+    let Some(path) = std::env::var_os("CMD_GATE_LOG") else {
+        return;
+    };
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(path)?;
+        file.lock()?;
+        file.seek(SeekFrom::End(0))?;
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(std::io::Error::other)?
+            .as_millis();
+        writeln!(file, "{}", json!({"timestamp": timestamp, "event": event}))
+    })();
+    if let Err(error) = result {
+        eprintln!("cmd-gate diagnostic logging failed: {error}");
+    }
+}
 
 fn field<'a>(v: &'a Value, camel: &str, snake: &str) -> Option<&'a Value> {
     v.get(camel).or_else(|| v.get(snake))
@@ -68,7 +92,9 @@ fn decide(payload: &Value) -> Option<String> {
         Ok(s) => s,
         Err(reason) => return Some(deny_complex(&reason, dialect)),
     };
-    match classify::classify(&simple, dialect) {
+    let class = classify::classify(&simple, dialect);
+    diagnostic(json!({"stage": "classification", "class": format!("{class:?}")}));
+    match class {
         Class::Plain => None,
         Class::Wrapper(name) => Some(deny_complex(
             &format!(
@@ -78,21 +104,44 @@ fn decide(payload: &Value) -> Option<String> {
             dialect,
         )),
         Class::Interpreter(name) => match state::consume_or_record(session, command) {
-            Ok(false) => Some(deny_interpreter(&name)),
-            Ok(true) | Err(_) => None,
+            Ok(seen) => {
+                diagnostic(json!({"stage": "retry_state", "seen": seen}));
+                if seen {
+                    None
+                } else {
+                    Some(deny_interpreter(&name))
+                }
+            }
+            Err(error) => {
+                diagnostic(json!({
+                    "stage": "retry_state",
+                    "error": error.to_string(),
+                    "HOME": std::env::var_os("HOME"),
+                    "XDG_STATE_HOME": std::env::var_os("XDG_STATE_HOME"),
+                }));
+                None
+            }
         },
     }
 }
 
 fn main() {
     let mut raw = String::new();
-    if std::io::stdin().read_to_string(&mut raw).is_err() {
+    if let Err(error) = std::io::stdin().read_to_string(&mut raw) {
+        diagnostic(json!({"stage": "stdin", "error": error.to_string()}));
         return;
     }
-    let Ok(payload) = serde_json::from_str::<Value>(&raw) else {
-        return;
+    let payload = match serde_json::from_str::<Value>(&raw) {
+        Ok(payload) => payload,
+        Err(error) => {
+            diagnostic(json!({"stage": "payload", "error": error.to_string()}));
+            return;
+        }
     };
-    if let Some(message) = decide(&payload) {
+    diagnostic(json!({"stage": "payload", "payload": payload}));
+    let decision = decide(&payload);
+    diagnostic(json!({"stage": "decision", "deny": decision.is_some(), "message": decision}));
+    if let Some(message) = decision {
         println!("{}", json!({ "behavior": "deny", "message": message }));
     }
 }

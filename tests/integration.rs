@@ -26,8 +26,18 @@ impl Env {
     }
 
     fn run_raw(&self, stdin: &str) -> (String, bool) {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_copilot-cmd-gate"))
+        self.run_raw_logged(stdin, None)
+    }
+
+    fn run_raw_logged(&self, stdin: &str, log: Option<&std::path::Path>) -> (String, bool) {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_copilot-cmd-gate"));
+        command
             .env("XDG_STATE_HOME", &self.state)
+            .env_remove("CMD_GATE_LOG");
+        if let Some(log) = log {
+            command.env("CMD_GATE_LOG", log);
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -80,6 +90,115 @@ impl Env {
             Out::Complex
         }
     }
+}
+
+#[test]
+#[cfg(windows)]
+fn windows_state_fallback_denies_then_allows_once_without_home_or_xdg() {
+    for local_app_data in [true, false] {
+        let env = Env::new();
+        let payload = json!({
+            "toolName": "powershell",
+            "sessionId": "windows-fallback",
+            "toolInput": {"command": "cmd.exe /c echo windows-state-probe"}
+        })
+        .to_string();
+        for deny in [true, false, true] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_copilot-cmd-gate"));
+            command
+                .env_remove("HOME")
+                .env_remove("XDG_STATE_HOME")
+                .env_remove("LOCALAPPDATA")
+                .env_remove("CMD_GATE_LOG")
+                .env("USERPROFILE", &env.state);
+            if local_app_data {
+                command.env("LOCALAPPDATA", &env.state);
+            }
+            let mut child = command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(payload.as_bytes())
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(output.status.success(), "{:?}", output.stderr);
+            if deny {
+                let decision: Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(decision["behavior"], "deny");
+                assert!(
+                    decision["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("blocked by default")
+                );
+            } else {
+                assert!(output.stdout.is_empty());
+            }
+        }
+        let base = if local_app_data {
+            env.state.clone()
+        } else {
+            env.state.join("AppData").join("Local")
+        };
+        assert!(
+            base.join("copilot-cmd-gate")
+                .join("windows-fallback.json")
+                .is_file()
+        );
+    }
+}
+
+#[test]
+fn diagnostics_record_interpreter_decision_and_state_errors() {
+    let env = Env::new();
+    std::fs::create_dir_all(&env.state).unwrap();
+    let log = env.state.join("audit.jsonl");
+    let payload = json!({
+        "toolName": "powershell",
+        "sessionId": "diagnostics",
+        "toolInput": {"command": "cmd.exe /c echo audit"}
+    })
+    .to_string();
+    let (stdout, ok) = env.run_raw_logged(&payload, Some(&log));
+    assert!(ok);
+    assert_eq!(
+        serde_json::from_str::<Value>(&stdout).unwrap()["behavior"],
+        "deny"
+    );
+    let events = || -> Vec<Value> {
+        std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap()["event"].clone())
+            .collect()
+    };
+    let recorded = events();
+    assert_eq!(
+        recorded[0]["payload"]["toolInput"]["command"],
+        "cmd.exe /c echo audit"
+    );
+    assert_eq!(recorded[1]["class"], "Interpreter(\"cmd\")");
+    assert_eq!(recorded[2]["seen"], false);
+    assert_eq!(recorded[3]["deny"], true);
+
+    std::fs::remove_dir_all(env.state.join("copilot-cmd-gate")).unwrap();
+    std::fs::write(env.state.join("copilot-cmd-gate"), "not a directory").unwrap();
+    let (stdout, ok) = env.run_raw_logged(&payload, Some(&log));
+    assert!(ok);
+    assert!(stdout.is_empty());
+    let recorded = events();
+    assert!(
+        recorded[6]["error"]
+            .as_str()
+            .is_some_and(|error| !error.is_empty())
+    );
+    assert_eq!(recorded[7]["deny"], false);
 }
 
 impl Drop for Env {
@@ -428,7 +547,15 @@ fn payload_variants() {
         Out::Interp
     );
 
-    for tool in ["edit", "create", "view", "web_fetch", "Powershell", "Bash", ""] {
+    for tool in [
+        "edit",
+        "create",
+        "view",
+        "web_fetch",
+        "Powershell",
+        "Bash",
+        "",
+    ] {
         let p = json!({"toolName": tool, "toolInput": {"command": "a | b"}}).to_string();
         assert_eq!(c(&p), Out::Fall, "tool {tool:?}");
     }
@@ -658,6 +785,8 @@ fn powershell_interpreters_deny_then_allow_once() {
         "perl -e 1",
         "ruby a.rb",
         "cmd /c dir",
+        "cmd.exe /c echo gate-interpreter-probe",
+        "cmd.exe /c echo gate-interpreter-fresh-1058",
         "bash -c x",
         "pwsh -c x",
         "powershell -Command x",

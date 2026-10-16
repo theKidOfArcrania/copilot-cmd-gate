@@ -196,6 +196,17 @@ mod tests {
     }
 
     #[test]
+    fn powershell_cmd_exe_is_an_interpreter() {
+        for command in [
+            "cmd.exe /c echo gate-interpreter-probe",
+            "CMD.EXE /c echo gate-interpreter-probe",
+            "C:\\Windows\\System32\\cmd.exe /c echo gate-interpreter-probe",
+        ] {
+            assert_eq!(p(command), Class::Interpreter("cmd".into()), "{command:?}");
+        }
+    }
+
+    #[test]
     fn classifies_powershell() {
         let i = |s: &str| Class::Interpreter(s.into());
         assert_eq!(p("Get-ChildItem -Force"), Class::Plain);
