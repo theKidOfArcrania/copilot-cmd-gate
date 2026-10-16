@@ -51,7 +51,8 @@ fn deny_complex(reason: &str, dialect: Dialect) -> String {
         Dialect::PowerShell => (
             "> >> or 2>&1",
             "No pipes, ||, the call operator & mid-command, $variables, $(...) subexpressions, \
-             script blocks, splatting, backtick escapes, or comma arrays",
+             script blocks, splatting, backtick escapes except for double quotes inside \
+             double-quoted strings, or comma arrays",
         ),
     };
     format!(

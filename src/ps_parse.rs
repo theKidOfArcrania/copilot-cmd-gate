@@ -5,7 +5,8 @@
 //! `>>` file redirects and `N>&1`/`N>&2` dups. The call operator `&` is only
 //! accepted as the first word of a command (and classified as risky).
 //! Everything else (pipes, `$variables`, subexpressions, script blocks,
-//! splatting, backtick escapes, `<` redirects, ...) is rejected.
+//! splatting, backtick escapes other than double quotes inside double-quoted
+//! strings, `<` redirects, ...) is rejected.
 
 use crate::parse::{Script, Tok, assemble, bad};
 
@@ -66,12 +67,17 @@ fn tokenize(input: &str) -> Result<Vec<Tok>, String> {
                         return Err("control or non-ASCII character in quotes".into());
                     }
                     if x == c {
-                        if c == '\'' && chars.get(i + 1) == Some(&'\'') {
-                            cur.push('\'');
+                        if chars.get(i + 1) == Some(&c) {
+                            cur.push(c);
                             i += 2;
                             continue;
                         }
                         break;
+                    }
+                    if c == '"' && x == '`' && chars.get(i + 1) == Some(&'"') {
+                        cur.push('"');
+                        i += 2;
+                        continue;
                     }
                     if c == '"' && matches!(x, '$' | '`') {
                         return Err(bad(x));
@@ -196,6 +202,32 @@ mod tests {
     }
 
     #[test]
+    fn accepts_escaped_double_quotes() {
+        for (input, expected) in [
+            (r#"echo "`"hello`"" "#, "\"hello\""),
+            (r#"echo """hello""""#, "\"hello\""),
+            (r#"echo "x""y""#, "x\"y"),
+            (r#"echo "a`"; | & b""#, "a\"; | & b"),
+            (r#"echo "a""; | & b""#, "a\"; | & b"),
+        ] {
+            assert_eq!(commands(input), [vec!["echo", expected]], "{input:?}");
+        }
+        for input in [
+            r#"echo "`"unterminated"#,
+            r#"echo "unterminated"""#,
+            r#"echo "a`"$x""#,
+            r#"echo "a""$x""#,
+            r#"echo "a`"$(pwd)""#,
+            r#"echo "a""$(pwd)""#,
+            r#"echo "`"x`"" | cat"#,
+            r#"echo """x""" | cat"#,
+            r#"echo "a``b""#,
+        ] {
+            assert!(parse(input).is_err(), "should reject {input:?}");
+        }
+    }
+
+    #[test]
     fn rejects() {
         for s in [
             "a | b",
@@ -221,7 +253,6 @@ mod tests {
             "a x'y'",
             "a 'x'y",
             "a 'x''y'z",
-            "a \"x\"\"y\"",
             "a --%",
             "a --% %PATH%",
             "a ’b’",
