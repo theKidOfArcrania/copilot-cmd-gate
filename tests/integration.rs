@@ -44,11 +44,19 @@ impl Env {
     }
 
     fn run(&self, session: &str, command: &str) -> Out {
+        self.run_tool("bash", session, command)
+    }
+
+    fn run_ps(&self, session: &str, command: &str) -> Out {
+        self.run_tool("powershell", session, command)
+    }
+
+    fn run_tool(&self, tool: &str, session: &str, command: &str) -> Out {
         let payload = json!({
             "hookName": "permissionRequest",
             "sessionId": session,
             "cwd": "/tmp",
-            "toolName": "bash",
+            "toolName": tool,
             "toolInput": { "command": command },
             "permissionSuggestions": []
         });
@@ -420,7 +428,7 @@ fn payload_variants() {
         Out::Interp
     );
 
-    for tool in ["edit", "create", "view", "web_fetch", "powershell", ""] {
+    for tool in ["edit", "create", "view", "web_fetch", "Powershell", "Bash", ""] {
         let p = json!({"toolName": tool, "toolInput": {"command": "a | b"}}).to_string();
         assert_eq!(c(&p), Out::Fall, "tool {tool:?}");
     }
@@ -525,4 +533,163 @@ fn only_the_first_word_picks_the_class() {
     ] {
         assert_eq!(env.run("s", cmd), Out::Fall, "{cmd:?}");
     }
+}
+
+#[test]
+fn quote_backslash_escapes() {
+    let env = Env::new();
+    for cmd in [
+        r#"echo \"hi\""#,
+        r"echo \'hi\'",
+        r#"echo "say \"hi\"""#,
+        r#"echo "it\'s""#,
+        r#"git commit -m "fix \"x\" bug""#,
+        r#"echo a\"b; echo c\'d"#,
+        r"echo 'a\'",
+    ] {
+        assert_eq!(env.run("s", cmd), Out::Fall, "{cmd:?}");
+    }
+    for cmd in [
+        r"echo a\ b",
+        r"echo \n",
+        r"echo \;",
+        r"echo \$x",
+        r"echo \`x\`",
+        r"echo \\",
+        r"echo a\",
+        "echo a\\\nb",
+        r#"echo "a\\b""#,
+        r#"echo "\$x""#,
+        r#"echo "a\"#,
+        r#"echo \"$x\""#,
+        r#"echo \"; ls | cat"#,
+        r#"echo "a\" | cat"#,
+    ] {
+        assert_eq!(env.run("s", cmd), Out::Complex, "{cmd:?}");
+    }
+}
+
+#[test]
+fn powershell_simple_commands_fall_through() {
+    let env = Env::new();
+    for cmd in [
+        "Get-ChildItem",
+        "Get-ChildItem -Force C:\\Users\\x",
+        "ls -Recurse *.rs",
+        "git status",
+        "git commit -m 'it''s; a | b && c $x'",
+        "Write-Output \"hi there\" > out.txt 2>&1",
+        "cargo test >> log 2>&1",
+        "Set-Location C:\\x; Get-ChildItem",
+        "cd x && git status",
+        "echo 'a' ; echo b",
+        "echo a>b",
+        "echo ''",
+        "ls a#b ?.rs",
+        "echo python",
+        "Get-Content file.txt -TotalCount 5",
+    ] {
+        assert_eq!(env.run_ps("s", cmd), Out::Fall, "{cmd:?}");
+    }
+}
+
+#[test]
+fn powershell_complex_commands_are_denied() {
+    let env = Env::new();
+    for cmd in [
+        "ls | Select-String x",
+        "a || b",
+        "a &",
+        "a & b",
+        "ls $x",
+        "ls $env:PATH",
+        "ls $(pwd)",
+        "ls (pwd)",
+        "ls { 1 }",
+        "ls @args",
+        "ls @(1,2)",
+        "ls 1,2",
+        "ls `n",
+        "echo \"a$b\"",
+        "echo \"a`nb\"",
+        "ls < f",
+        "ls <# c #>",
+        "ls # comment",
+        "ls !x",
+        "ls x'y'",
+        "ls 'x'y",
+        "ls \"x\"\"y\"",
+        "ls --%",
+        "ls --% %PATH%",
+        "ls ’x’",
+        "ls 'x’y'",
+        "ls 'x",
+        "ls \"x",
+        "ls >",
+        "ls >&3",
+        "ls ;; ls",
+        "ls &&& ls",
+        "ls ;",
+        "; ls",
+        "ls\nls",
+        "ls\rls",
+        "FOO=1 ls",
+        "&",
+        "& ",
+        "ls && & ",
+        "ls && ls &&",
+        "ls ; ls ; ls ; ls ; ls ; ls ; ls ; ls ; ls",
+        "foreach x",
+        "if x",
+        ". ./profile.ps1",
+        "ForEach-Object x",
+        "Invoke-Item x",
+    ] {
+        assert_eq!(env.run_ps("s", cmd), Out::Complex, "{cmd:?}");
+    }
+}
+
+#[test]
+fn powershell_interpreters_deny_then_allow_once() {
+    let env = Env::new();
+    for cmd in [
+        "python a.py",
+        "node x.js",
+        "perl -e 1",
+        "ruby a.rb",
+        "cmd /c dir",
+        "bash -c x",
+        "pwsh -c x",
+        "powershell -Command x",
+        "powershell.exe -File x.ps1",
+        "C:\\Python312\\python.exe a.py",
+        "Invoke-Expression 'ls'",
+        "iex 'ls'",
+        "IEX 'ls'",
+        "Start-Process notepad",
+        "Invoke-Command -ScriptBlock x",
+        "& 'C:\\tool.exe' a",
+        "& ls",
+        "ls; & tool x",
+        "ls && iex 'x'",
+    ] {
+        assert_eq!(env.run_ps("s", cmd), Out::Interp, "first {cmd:?}");
+        assert_eq!(env.run_ps("s", cmd), Out::Fall, "retry {cmd:?}");
+        assert_eq!(env.run_ps("s", cmd), Out::Interp, "third {cmd:?}");
+    }
+}
+
+#[test]
+fn powershell_and_bash_are_distinguished() {
+    let env = Env::new();
+    // `$x` is rejected by both, but `\` paths and `''` escapes are PowerShell-only.
+    assert_eq!(env.run("s", "ls C:\\x"), Out::Complex);
+    assert_eq!(env.run_ps("s", "ls C:\\x"), Out::Fall);
+    assert_eq!(env.run("s", "echo 'it''s'"), Out::Fall);
+    assert_eq!(env.run_ps("s", "echo 'it''s'"), Out::Fall);
+    assert_eq!(env.run("s", "echo \\\"x\\\""), Out::Fall);
+    assert_eq!(env.run_ps("s", "echo \\\"x\\\""), Out::Complex);
+    // Other tool names are ignored.
+    let (out, ok) = env.run_raw(r#"{"toolName":"Powershell","toolInput":{"command":"a | b"}}"#);
+    assert!(ok && out.trim().is_empty());
 }

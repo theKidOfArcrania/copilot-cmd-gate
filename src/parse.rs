@@ -14,7 +14,7 @@ pub struct Script {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum Tok {
+pub enum Tok {
     Word(String),
     Redir,
     Dup,
@@ -22,7 +22,11 @@ enum Tok {
 }
 
 pub fn parse(input: &str) -> Result<Script, String> {
-    let toks = tokenize(input)?;
+    assemble(&tokenize(input)?)
+}
+
+/// Splits tokens on separators into commands; shared by every dialect.
+pub fn assemble(toks: &[Tok]) -> Result<Script, String> {
     let commands = toks
         .split(|t| *t == Tok::Sep)
         .map(parse_command)
@@ -57,7 +61,7 @@ fn parse_command(toks: &[Tok]) -> Result<Vec<String>, String> {
     Ok(words)
 }
 
-fn bad(c: char) -> String {
+pub fn bad(c: char) -> String {
     format!("unsupported shell syntax `{}`", c.escape_default())
 }
 
@@ -105,7 +109,19 @@ fn tokenize(input: &str) -> Result<Vec<Tok>, String> {
                     };
                     match x {
                         '"' => break,
-                        '$' | '`' | '\\' | '!' => return Err(bad(x)),
+                        '\\' => match chars.get(i + 1) {
+                            Some('"') => {
+                                cur.push('"');
+                                i += 1;
+                            }
+                            // Bash keeps the backslash before a single quote here.
+                            Some('\'') => {
+                                cur.push_str("\\'");
+                                i += 1;
+                            }
+                            _ => return Err(bad(x)),
+                        },
+                        '$' | '`' | '!' => return Err(bad(x)),
                         _ if x.is_control() => return Err("control character in quotes".into()),
                         _ => cur.push(x),
                     }
@@ -159,7 +175,16 @@ fn tokenize(input: &str) -> Result<Vec<Tok>, String> {
                     return Err(bad(c));
                 }
             }
-            '|' | '(' | ')' | '{' | '}' | '[' | ']' | '`' | '$' | '\\' | '!' => {
+            '\\' => match chars.get(i + 1) {
+                Some(&q @ ('"' | '\'')) => {
+                    cur.push(q);
+                    in_word = true;
+                    digits_only = false;
+                    i += 1;
+                }
+                _ => return Err(bad(c)),
+            },
+            '|' | '(' | ')' | '{' | '}' | '[' | ']' | '`' | '$' | '!' => {
                 return Err(bad(c));
             }
             _ if c.is_control() || !c.is_ascii() => return Err(bad(c)),
@@ -211,6 +236,11 @@ mod tests {
         assert_eq!(words("echo a>b"), ["echo", "a"]);
         assert_eq!(words("'python' x"), ["python", "x"]);
         assert_eq!(words("echo 'a'\"b\"c"), ["echo", "abc"]);
+        assert_eq!(words(r#"echo \"hi\" \'x\'"#), ["echo", "\"hi\"", "'x'"]);
+        assert_eq!(words(r#"echo "say \"hi\"""#), ["echo", "say \"hi\""]);
+        assert_eq!(words(r#"echo "it\'s""#), ["echo", "it\\'s"]);
+        assert_eq!(words(r"echo 'a\'"), ["echo", "a\\"]);
+        assert_eq!(words(r#"echo a\"b"#), ["echo", "a\"b"]);
     }
 
     #[test]
@@ -291,6 +321,14 @@ mod tests {
             "echo \"`x`\"",
             "echo \"\\n\"",
             "echo a\\ b",
+            "echo a\\\\b",
+            "echo \\",
+            "echo a\\",
+            "echo \\$x",
+            "echo \\;",
+            "echo \"a\\\\b\"",
+            "echo \"a\\\"",
+            "echo \"\\$x\"",
             "a\nb",
             "a <<EOF",
             "a <<< b",
