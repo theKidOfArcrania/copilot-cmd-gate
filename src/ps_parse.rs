@@ -5,8 +5,8 @@
 //! `>>` file redirects and `N>&1`/`N>&2` dups. The call operator `&` is only
 //! accepted as the first word of a command (and classified as risky).
 //! Everything else (pipes, `$variables`, subexpressions, script blocks,
-//! splatting, backtick escapes other than double quotes inside double-quoted
-//! strings, `<` redirects, ...) is rejected.
+//! splatting, backtick escapes other than literal quotes and dollars,
+//! `<` redirects, ...) is rejected.
 
 use crate::parse::{Script, Tok, assemble, bad};
 
@@ -74,10 +74,12 @@ fn tokenize(input: &str) -> Result<Vec<Tok>, String> {
                         }
                         break;
                     }
-                    if c == '"' && x == '`' && chars.get(i + 1) == Some(&'"') {
-                        cur.push('"');
-                        i += 2;
-                        continue;
+                    if c == '"' && x == '`' {
+                        if let Some(&escaped @ ('"' | '\'' | '$')) = chars.get(i + 1) {
+                            cur.push(escaped);
+                            i += 2;
+                            continue;
+                        }
                     }
                     if c == '"' && matches!(x, '$' | '`') {
                         return Err(bad(x));
@@ -140,7 +142,19 @@ fn tokenize(input: &str) -> Result<Vec<Tok>, String> {
                     return Err(bad(c));
                 }
             }
-            '|' | '(' | ')' | '{' | '}' | '[' | ']' | '`' | '$' | '@' | ',' | '!' | '<' => {
+            '`' => {
+                if closed {
+                    return Err(bad(c));
+                }
+                let Some(&escaped @ ('"' | '\'' | '$')) = chars.get(i + 1) else {
+                    return Err(bad(c));
+                };
+                cur.push(escaped);
+                in_word = true;
+                digits_only = false;
+                i += 1;
+            }
+            '|' | '(' | ')' | '{' | '}' | '[' | ']' | '$' | '@' | ',' | '!' | '<' => {
                 return Err(bad(c));
             }
             _ if c.is_control() => return Err(bad(c)),
@@ -199,6 +213,33 @@ mod tests {
         assert_eq!(commands("echo ''"), [vec!["echo", ""]]);
         assert_eq!(commands("echo a>b"), [vec!["echo", "a"]]);
         assert_eq!(commands("echo hi 2> err.txt"), [vec!["echo", "hi"]]);
+    }
+
+    #[test]
+    fn accepts_literal_backtick_escapes() {
+        for (input, expected) in [
+            (r#"echo `$x"#, "$x"),
+            (r#"echo "`$x""#, "$x"),
+            (r#"echo `"x`""#, "\"x\""),
+            (r#"echo it`'s"#, "it's"),
+            (r#"echo "it`'s""#, "it's"),
+            (r#"echo '`$x'"#, "`$x"),
+            (r#"echo "`$(pwd)""#, "$(pwd)"),
+        ] {
+            assert_eq!(commands(input), [vec!["echo", expected]], "{input:?}");
+        }
+        for input in [
+            r#"echo `$x$y"#,
+            r#"echo "`$x$y""#,
+            r#"echo `$(pwd)"#,
+            r#"echo "`$x$(pwd)""#,
+            r#"echo "x"`$y"#,
+            r#"echo `$x | cat"#,
+            r#"echo `"#,
+            r#"echo "`"#,
+        ] {
+            assert!(parse(input).is_err(), "should reject {input:?}");
+        }
     }
 
     #[test]

@@ -110,8 +110,8 @@ fn tokenize(input: &str) -> Result<Vec<Tok>, String> {
                     match x {
                         '"' => break,
                         '\\' => match chars.get(i + 1) {
-                            Some('"') => {
-                                cur.push('"');
+                            Some(&escaped @ ('"' | '$')) => {
+                                cur.push(escaped);
                                 i += 1;
                             }
                             // Bash keeps the backslash before a single quote here.
@@ -176,7 +176,7 @@ fn tokenize(input: &str) -> Result<Vec<Tok>, String> {
                 }
             }
             '\\' => match chars.get(i + 1) {
-                Some(&q @ ('"' | '\'')) => {
+                Some(&q @ ('"' | '\'' | '$')) => {
                     cur.push(q);
                     in_word = true;
                     digits_only = false;
@@ -241,6 +241,10 @@ mod tests {
         assert_eq!(words(r#"echo "it\'s""#), ["echo", "it\\'s"]);
         assert_eq!(words(r"echo 'a\'"), ["echo", "a\\"]);
         assert_eq!(words(r#"echo a\"b"#), ["echo", "a\"b"]);
+        assert_eq!(
+            words(r#"echo \$x "\$x" '\$x'"#),
+            ["echo", "$x", "$x", "\\$x"]
+        );
     }
 
     #[test]
@@ -324,11 +328,9 @@ mod tests {
             "echo a\\\\b",
             "echo \\",
             "echo a\\",
-            "echo \\$x",
             "echo \\;",
             "echo \"a\\\\b\"",
             "echo \"a\\\"",
-            "echo \"\\$x\"",
             "a\nb",
             "a <<EOF",
             "a <<< b",
