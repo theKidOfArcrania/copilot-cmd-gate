@@ -10,7 +10,9 @@ fn hooks_dir(arg: Option<PathBuf>) -> Result<PathBuf, String> {
     if let Some(dir) = arg {
         return Ok(dir);
     }
-    let home = std::env::var_os("HOME").ok_or("HOME is not set; pass --dir <hooks dir>")?;
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .ok_or("neither HOME nor USERPROFILE is set; pass --dir <hooks dir>")?;
     Ok(PathBuf::from(home).join(".copilot").join("hooks"))
 }
 
