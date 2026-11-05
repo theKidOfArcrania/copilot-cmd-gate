@@ -841,3 +841,39 @@ fn powershell_and_bash_are_distinguished() {
     let (out, ok) = env.run_raw(r#"{"toolName":"Powershell","toolInput":{"command":"a | b"}}"#);
     assert!(ok && out.trim().is_empty());
 }
+
+#[test]
+fn install_writes_hook_config() {
+    let env = Env::new();
+    let dir = env.state.join("hooks");
+    let exe = env!("CARGO_BIN_EXE_copilot-cmd-gate");
+    let run = |args: &[&str]| {
+        Command::new(exe)
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+
+    let out = run(&["install", "--dir", dir.to_str().unwrap()]);
+    assert!(out.status.success(), "{out:?}");
+    let written: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("cmd-gate.json")).unwrap()).unwrap();
+    let hook = &written["hooks"]["permissionRequest"][0];
+    assert_eq!(written["version"], 1);
+    assert_eq!(hook["type"], "command");
+    assert_eq!(hook["matcher"], "bash|powershell");
+    let installed = std::fs::canonicalize(hook["exec"].as_str().unwrap()).unwrap();
+    assert_eq!(installed, std::fs::canonicalize(exe).unwrap());
+
+    // Re-running overwrites cleanly.
+    assert!(
+        run(&["install", "--dir", dir.to_str().unwrap()])
+            .status
+            .success()
+    );
+
+    for bad in [&["install", "--dir"][..], &["install", "x"], &["bogus"]] {
+        assert!(!run(bad).status.success(), "{bad:?}");
+    }
+}

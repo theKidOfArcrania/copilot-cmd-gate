@@ -4,8 +4,12 @@
 //! are too complex or that invoke a scripting language; prints nothing
 //! (falling through to the normal permission engine) for everything else.
 //! Any internal error also prints nothing.
+//!
+//! `copilot-cmd-gate install [--dir <hooks dir>]` registers the binary as a
+//! user-level hook instead of running as one.
 
 mod classify;
+mod install;
 mod parse;
 mod ps_parse;
 mod state;
@@ -127,6 +131,21 @@ fn decide(payload: &Value) -> Option<String> {
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some((cmd, rest)) = args.split_first() {
+        if cmd != "install" {
+            eprintln!("unknown command `{cmd}`; usage: copilot-cmd-gate [install [--dir <dir>]]");
+            std::process::exit(2);
+        }
+        match install::run(rest) {
+            Ok(msg) => println!("{msg}"),
+            Err(e) => {
+                eprintln!("install failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let mut raw = String::new();
     if let Err(error) = std::io::stdin().read_to_string(&mut raw) {
         diagnostic(json!({"stage": "stdin", "error": error.to_string()}));
